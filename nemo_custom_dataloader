@@ -1,0 +1,95 @@
+import io
+import torch
+from torch.utils.data import Dataset, DataLoader
+from typing import List, Optional, Union
+
+class SimplifiedAudioDataset(Dataset):
+    def __init__(
+        self,
+        audio_files: List[io.BytesIO],
+        labels: List[str],
+        featurizer,
+        is_regression_task: bool = False,
+        delimiter: Optional[str] = None
+    ):
+        self.audio_files = audio_files
+        self.featurizer = featurizer
+        self.is_regression_task = is_regression_task
+        self.delimiter = delimiter
+
+        self.labels = labels if not is_regression_task else []
+        self.num_classes = len(self.labels) if not is_regression_task else 1
+        
+        if not is_regression_task:
+            self.label2id = {label: i for i, label in enumerate(self.labels)}
+            self.id2label = {i: label for label, i in self.label2id.items()}
+
+    def __len__(self):
+        return len(self.audio_files)
+
+    def _label_str_to_tensor(self, label_str: str):
+        labels = label_str.split(self.delimiter) if self.delimiter else label_str.split()
+
+        if self.is_regression_task:
+            return torch.tensor([float(s) for s in labels]).float()
+        else:
+            return torch.tensor([self.label2id[s] for s in labels]).long()
+
+    def __getitem__(self, index):
+        audio_file = self.audio_files[index]
+        features = self.featurizer.process(audio_file)
+        
+        f, fl = features, torch.tensor(features.size(0)).long()
+        
+        # Assuming labels are stored in the audio_file object or metadata
+        # You may need to adjust this part based on how you store labels
+        label_str = getattr(audio_file, 'label', '')
+        t = self._label_str_to_tensor(label_str)
+        tl = torch.tensor(t.size(0)).long()
+
+        return f, fl, t, tl
+
+def _speech_collate_fn(batch):
+    """Collate batch of audio sig, audio len, tokens, tokens len"""
+    audio_signals, audio_lengths, labels, label_lengths = zip(*batch)
+
+    max_audio_len = max(audio_lengths).item()
+    max_labels_len = max(label_lengths).item()
+
+    audio_signal_padded = []
+    labels_padded = []
+
+    for sig, sig_len, lab, lab_len in zip(audio_signals, audio_lengths, labels, label_lengths):
+        audio_signal_padded.append(torch.nn.functional.pad(sig, (0, max_audio_len - sig_len)))
+        labels_padded.append(torch.nn.functional.pad(lab, (0, max_labels_len - lab_len), value=0))
+
+    audio_signal = torch.stack(audio_signal_padded)
+    audio_lengths = torch.stack(audio_lengths)
+    labels = torch.stack(labels_padded)
+    label_lengths = torch.stack(label_lengths)
+
+    return audio_signal, audio_lengths, labels, label_lengths
+
+def create_audio_dataloader(
+    audio_files: List[io.BytesIO],
+    labels: List[str],
+    featurizer,
+    batch_size: int,
+    shuffle: bool = True,
+    is_regression_task: bool = False,
+    delimiter: Optional[str] = None
+):
+    dataset = SimplifiedAudioDataset(
+        audio_files=audio_files,
+        labels=labels,
+        featurizer=featurizer,
+        is_regression_task=is_regression_task,
+        delimiter=delimiter
+    )
+
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        collate_fn=_speech_collate_fn
+    )
